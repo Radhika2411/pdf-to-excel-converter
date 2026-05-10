@@ -2,54 +2,81 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import io
+import re
 
-st.set_page_config(page_title="Universal Bank Statement Converter", layout="wide")
-st.title("🏦 Universal Bank to Excel Converter")
-st.write("Extracts Date, Particulars, Deposits, Withdrawals, and Balance from any bank PDF.")
+st.set_page_config(page_title="ICICI Statement Converter", layout="wide")
+st.title("🏦 ICICI Bank PDF to Excel Converter")
+st.write("Specially optimized for multi-line UPI and NEFT transactions.")
 
-uploaded_file = st.file_uploader("Upload Bank Statement (PDF)", type="pdf")
+uploaded_file = st.file_uploader("Upload your ICICI PDF Statement", type="pdf")
+
+def is_date(text):
+    """Checks if a string matches the DD-MM-YYYY format."""
+    if not text: return False
+    return bool(re.match(r'\d{2}-\d{2}-\d{4}', str(text)))
 
 if uploaded_file is not None:
-    with st.spinner('Processing transactions...'):
-        all_data = []
+    with st.spinner('Processing 58 pages... please wait.'):
+        raw_rows = []
         
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
-                # Use 'text' strategy because bank statements often lack vertical lines
+                # ICICI statements usually don't have vertical lines. 
+                # 'text' strategy helps identify columns by alignment.
                 table = page.extract_table({
-                    "vertical_strategy": "text", 
-                    "horizontal_strategy": "lines",
-                    "snap_tolerance": 3,
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text",
+                    "snap_tolerance": 3
                 })
                 
                 if table:
-                    df = pd.DataFrame(table)
-                    # 1. Remove rows that are entirely empty
-                    df = df.dropna(how='all')
-                    all_data.append(df)
+                    for row in table:
+                        # Clean each cell of extra newlines and whitespace
+                        clean_row = [str(cell).replace('\n', ' ').strip() if cell else "" for cell in row]
+                        # Ignore the repetitive header rows
+                        if clean_row[0] == "DATE" or not any(clean_row):
+                            continue
+                        raw_rows.append(clean_row)
 
-        if all_data:
-            # Combine all pages
-            final_df = pd.concat(all_data, ignore_index=True)
-            
-            # 2. Cleanup: Remove rows that repeat the headers (like "DATE", "PARTICULARS")
-            # We look for rows where the first column is 'DATE' and remove them
-            final_df = final_df[final_df[0].str.upper() != 'DATE']
-            
-            st.success("Successfully Extracted!")
-            st.dataframe(final_df) # Show the full table preview
+        # --- LOGIC TO MERGE MULTI-LINE TRANSACTIONS ---
+        final_transactions = []
+        current_tx = None
 
-            # 3. Export to Excel
+        for row in raw_rows:
+            # If the first column is a date, it's a NEW transaction
+            if is_date(row[0]):
+                if current_tx:
+                    final_transactions.append(current_tx)
+                current_tx = row
+            # If no date, it belongs to the PREVIOUS transaction
+            elif current_tx:
+                for i in range(len(row)):
+                    if row[i]:
+                        # Combine text with a space (fixing the broken UPI strings)
+                        current_tx[i] = f"{current_tx[i]} {row[i]}".strip()
+
+        if current_tx:
+            final_transactions.append(current_tx)
+
+        if final_transactions:
+            # Structure into a proper table
+            columns = ["DATE", "MODE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"]
+            # Ensure the data matches the column count (ICICI is usually 5-6 columns)
+            df = pd.DataFrame(final_transactions)
+            
+            st.success(f"Extracted {len(final_transactions)} transactions!")
+            st.dataframe(df)
+
+            # Export to Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                final_df.to_excel(writer, index=False, header=False) # Header=False because PDF rows already include them
+                df.to_excel(writer, index=False, header=columns[:len(df.columns)])
             
             st.download_button(
-                label="📥 Download Excel File",
+                label="📥 Download Corrected Excel File",
                 data=output.getvalue(),
-                file_name="bank_statement_cleaned.xlsx",
+                file_name="ICICI_Cleaned_Statement.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("Could not find a table structure. This PDF might be a scanned image.")
-
+            st.error("No transactions found. Please check if the PDF is a scanned image.")
