@@ -4,83 +4,107 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="ICICI Statement Converter", layout="wide")
-st.title("🏦 ICICI Bank PDF to Excel Converter")
-st.write("Fixed 'Length Mismatch' error. Optimized for 58+ page statements.")
+st.set_page_config(page_title="ICICI Statement Structured", layout="wide")
+st.title("🏦 Structured ICICI PDF to Excel")
+st.write("Extracts exactly 5 columns: Date, Particulars, Deposits, Withdrawals, Balance.")
 
 uploaded_file = st.file_uploader("Upload your ICICI PDF Statement", type="pdf")
 
-def is_date(text):
-    """Checks if a cell matches the DD-MM-YYYY format."""
-    if not text or not isinstance(text, str): return False
-    return bool(re.match(r'\d{2}-\d{2}-\d{4}', text.strip()))
+def parse_icici(pdf_file):
+    # Pattern to find Date (DD-MM-YYYY)
+    date_pattern = re.compile(r'^(\d{2}-\d{2}-\d{4})')
+    # Pattern to find amounts like 1,234.56 or 1234.56
+    amount_pattern = re.compile(r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})|\d+\.\d{2})')
+    
+    transactions = []
+    current_tx = None
+    last_balance = 0.0
 
-if uploaded_file is not None:
-    with st.spinner('Reading PDF... this may take a minute for large files.'):
-        raw_rows = []
-        # Standard ICICI Columns
-        TARGET_COLS = ["DATE", "MODE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"]
-        
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                table = page.extract_table({
-                    "vertical_strategy": "text",
-                    "horizontal_strategy": "text",
-                    "snap_tolerance": 3
-                })
-                
-                if table:
-                    for row in table:
-                        # Clean and normalize row length to exactly 6
-                        clean_row = [str(cell).replace('\n', ' ').strip() if cell else "" for cell in row]
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text: continue
+            
+            for line in text.split('\n'):
+                line = line.strip()
+                # Skip headers, footers, and junk
+                if not line or "Page" in line or "DATE" in line.upper():
+                    continue
+
+                date_match = date_pattern.search(line)
+                if date_match:
+                    # Save completed transaction
+                    if current_tx:
+                        transactions.append(current_tx)
+                    
+                    date = date_match.group(1)
+                    rest = line[len(date):].strip()
+                    
+                    # Find all numbers at the end of the line
+                    found_amounts = amount_pattern.findall(rest)
+                    
+                    # Clean the Particulars text by removing the amounts found
+                    particulars = rest
+                    for amt in found_amounts:
+                        particulars = particulars.replace(amt, "").strip()
+
+                    # Logic to sort Amounts into Deposit/Withdrawal/Balance
+                    dep, wdl, bal_str = "", "", "0.00"
+                    
+                    if len(found_amounts) >= 2:
+                        # Usually: [Amount] [Balance]
+                        curr_amt = float(found_amounts[-2].replace(',', ''))
+                        curr_bal = float(found_amounts[-1].replace(',', ''))
                         
-                        # Pad row with empty strings if it's too short
-                        while len(clean_row) < 6:
-                            clean_row.append("")
-                        # Truncate if it's too long (rare ghost columns)
-                        clean_row = clean_row[:6]
+                        if curr_bal >= last_balance:
+                            dep = found_amounts[-2]
+                        else:
+                            wdl = found_amounts[-2]
+                        
+                        bal_str = found_amounts[-1]
+                        last_balance = curr_bal
+                    elif len(found_amounts) == 1:
+                        # Case like B/F (Balance Forward)
+                        bal_str = found_amounts[0]
+                        last_balance = float(bal_str.replace(',', ''))
 
-                        # Skip headers and completely empty rows
-                        if not any(clean_row) or "DATE" in clean_row[0].upper():
-                            continue
-                        raw_rows.append(clean_row)
-
-        # --- SMART MERGE LOGIC ---
-        final_transactions = []
-        current_tx = None
-
-        for row in raw_rows:
-            if is_date(row[0]):
-                if current_tx:
-                    final_transactions.append(current_tx)
-                current_tx = list(row)
-            elif current_tx:
-                # Merge continuation lines into the Particulars column (index 2)
-                # We combine all cells from the messy line into the 'Particulars' box
-                extra_text = " ".join([item for item in row if item]).strip()
-                if extra_text:
-                    current_tx[2] = f"{current_tx[2]} {extra_text}".strip()
+                    current_tx = {
+                        "DATE": date,
+                        "PARTICULARS": particulars,
+                        "DEPOSITS": dep,
+                        "WITHDRAWALS": wdl,
+                        "BALANCE": bal_str
+                    }
+                
+                elif current_tx:
+                    # If line has no date, it's a continuation of the previous Particulars
+                    # Only append if it's not a stray page number
+                    if not amount_pattern.search(line):
+                        current_tx["PARTICULARS"] += " " + line
 
         if current_tx:
-            final_transactions.append(current_tx)
-
-        if final_transactions:
-            # Create DataFrame with guaranteed 6-column structure
-            df = pd.DataFrame(final_transactions, columns=TARGET_COLS)
+            transactions.append(current_tx)
             
-            st.success(f"Success! Processed {len(final_transactions)} transactions.")
+    return transactions
+
+if uploaded_file:
+    with st.spinner("Processing 58 pages..."):
+        data = parse_icici(uploaded_file)
+        if data:
+            df = pd.DataFrame(data)
+            # Ensure columns are in the exact order you requested
+            df = df[["DATE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"]]
+            
+            st.success(f"Extracted {len(df)} transactions!")
             st.dataframe(df)
 
-            # Generate Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
             
             st.download_button(
-                label="📥 Download Clean Excel File",
+                label="📥 Download Structured Excel File",
                 data=output.getvalue(),
-                file_name="ICICI_Final_Statement.xlsx",
+                file_name="ICICI_Structured_Statement.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:
-            st.error("No transactions detected. Is this a digital PDF (not a scan)?")
