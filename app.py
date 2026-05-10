@@ -6,23 +6,20 @@ import re
 
 st.set_page_config(page_title="ICICI Statement Converter", layout="wide")
 st.title("🏦 ICICI Bank PDF to Excel Converter")
-st.write("Specially optimized for multi-line UPI and NEFT transactions.")
 
 uploaded_file = st.file_uploader("Upload your ICICI PDF Statement", type="pdf")
 
 def is_date(text):
-    """Checks if a string matches the DD-MM-YYYY format."""
-    if not text: return False
-    return bool(re.match(r'\d{2}-\d{2}-\d{4}', str(text)))
+    """Checks if a cell matches the DD-MM-YYYY format."""
+    if not text or not isinstance(text, str): return False
+    return bool(re.match(r'\d{2}-\d{2}-\d{4}', text.strip()))
 
 if uploaded_file is not None:
-    with st.spinner('Processing 58 pages... please wait.'):
+    with st.spinner('Processing pages... please wait.'):
         raw_rows = []
         
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
-                # ICICI statements usually don't have vertical lines. 
-                # 'text' strategy helps identify columns by alignment.
                 table = page.extract_table({
                     "vertical_strategy": "text",
                     "horizontal_strategy": "text",
@@ -31,52 +28,55 @@ if uploaded_file is not None:
                 
                 if table:
                     for row in table:
-                        # Clean each cell of extra newlines and whitespace
+                        # Clean extra spaces and newlines
                         clean_row = [str(cell).replace('\n', ' ').strip() if cell else "" for cell in row]
-                        # Ignore the repetitive header rows
-                        if clean_row[0] == "DATE" or not any(clean_row):
+                        # Skip empty rows or page headers
+                        if not any(clean_row) or clean_row[0].upper() == "DATE":
                             continue
                         raw_rows.append(clean_row)
 
-        # --- LOGIC TO MERGE MULTI-LINE TRANSACTIONS ---
+        # --- SAFER MERGE LOGIC ---
         final_transactions = []
         current_tx = None
 
         for row in raw_rows:
-            # If the first column is a date, it's a NEW transaction
+            # Check only the FIRST cell for a date
             if is_date(row[0]):
                 if current_tx:
                     final_transactions.append(current_tx)
-                current_tx = row
-            # If no date, it belongs to the PREVIOUS transaction
+                current_tx = list(row)
             elif current_tx:
-                for i in range(len(row)):
+                # Merge safely: loop only up to the shorter of the two rows
+                for i in range(min(len(row), len(current_tx))):
                     if row[i]:
-                        # Combine text with a space (fixing the broken UPI strings)
+                        # Combine text with a space
                         current_tx[i] = f"{current_tx[i]} {row[i]}".strip()
 
+        # Add the last transaction
         if current_tx:
             final_transactions.append(current_tx)
 
         if final_transactions:
-            # Structure into a proper table
-            columns = ["DATE", "MODE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"]
-            # Ensure the data matches the column count (ICICI is usually 5-6 columns)
             df = pd.DataFrame(final_transactions)
+            # ICICI Headers
+            cols = ["DATE", "MODE", "PARTICULARS", "DEPOSITS", "WITHDRAWALS", "BALANCE"]
             
-            st.success(f"Extracted {len(final_transactions)} transactions!")
+            # Map column names safely even if table width varies
+            df.columns = cols[:len(df.columns)]
+            
+            st.success(f"Success! Found {len(final_transactions)} transactions.")
             st.dataframe(df)
 
-            # Export to Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, header=columns[:len(df.columns)])
+                df.to_excel(writer, index=False)
             
             st.download_button(
-                label="📥 Download Corrected Excel File",
+                label="📥 Download Clean Excel File",
                 data=output.getvalue(),
                 file_name="ICICI_Cleaned_Statement.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("No transactions found. Please check if the PDF is a scanned image.")
+            st.error("No transactions found. Ensure the PDF isn't an image/scan.")
+
